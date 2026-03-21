@@ -30,6 +30,7 @@ final class ESManager: NSObject {
     let allowWindowSeconds: TimeInterval = 10
     var decisionCache: [String: ExecDecision] = [:]
     var currentLanguage: String = Locale.preferredLanguages.first ?? "en"
+    var configMonitorSource: DispatchSourceFileSystemObject?
 
     struct BlockedNotification {
         let name: String
@@ -68,9 +69,6 @@ final class ESManager: NSObject {
 
     var activeMessageCount: Int32 = 0
     let shaSemaphore = DispatchSemaphore(value: 12)
-
-    // Key generation lock to prevent concurrent RSA generation spikes
-    private let keyGenLock = os_unfair_lock()
 
     // MARK: - File Access Cache / Rate Limiting (Flood Protection)
     let fileAccessLock = FastLock()

@@ -45,7 +45,8 @@ extension ESManager {
                 // Atomic Swap
                 self.stateLock.perform {
                     self.blockedSHAs = newBlockedSHAs
-                    self.blockedPathToSHA.merge(newPathToSHA) { (_, new) in new }
+                    self.blockedPathToSHA = newPathToSHA
+                    self.decisionCache.removeAll()
                 }
                 
                 let totalApps = newBlockedSHAs.values.reduce(0) { $0 + $1.count }
@@ -57,12 +58,13 @@ extension ESManager {
         }
     }
     
-    /// Theo dõi thay đổi của file cấu hình
+    /// Theo dõi thay đổi của thư mục chứa cấu hình để bắt được sự kiện Atomic Write (Rename/Delete)
     func startConfigMonitoring() {
-        let fileDescriptor = open(ESManager.configPath, O_EVTONLY)
+        let configDir = URL(fileURLWithPath: ESManager.configPath).deletingLastPathComponent().path
+        let fileDescriptor = open(configDir, O_EVTONLY)
+        
         guard fileDescriptor != -1 else {
-            Logfile.endpointSecurity.error("ESManager: Failed to open config file for monitoring.")
-            // Thử lại sau nếu file chưa tồn tại
+            Logfile.endpointSecurity.error("ESManager: Failed to open config directory for monitoring: \(configDir)")
             backgroundProcessingQueue.asyncAfter(deadline: .now() + 5) { [weak self] in
                 self?.startConfigMonitoring()
             }
@@ -71,41 +73,35 @@ extension ESManager {
         
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fileDescriptor,
-            eventMask: [.write, .delete, .rename],
+            eventMask: [.write], // Directory write covers file create/delete/rename
             queue: backgroundProcessingQueue
         )
         
         var debounceTimer: DispatchSourceTimer?
         
         source.setEventHandler { [weak self] in
-            let event = source.data
-            if event.contains(.delete) || event.contains(.rename) {
-                Logfile.endpointSecurity.warning("Config file deleted or renamed. Restarting monitor...")
-                source.cancel()
-                return
-            }
+            guard let self = self else { return }
             
-            // Debounce logic: Đợi 500ms sau lần thay đổi cuối cùng
-            debounceTimer?.cancel()
-            let timer = DispatchSource.makeTimerSource(queue: self?.backgroundProcessingQueue)
-            timer.schedule(deadline: .now() + 0.5)
-            timer.setEventHandler {
-                self?.loadInitialConfig()
-                timer.cancel()
+            self.stateLock.perform {
+                debounceTimer?.cancel()
+                let timer = DispatchSource.makeTimerSource(queue: self.backgroundProcessingQueue)
+                timer.schedule(deadline: .now() + 0.3) // Debounce 300ms
+                timer.setEventHandler { [weak self] in
+                    Logfile.endpointSecurity.log("ESManager: Directory change detected, reloading config...")
+                    self?.loadInitialConfig()
+                    timer.cancel()
+                }
+                timer.resume()
+                debounceTimer = timer
             }
-            timer.resume()
-            debounceTimer = timer
         }
         
         source.setCancelHandler {
             close(fileDescriptor)
-            // Tự động khởi động lại trình theo dõi (vì file có thể bị ghi đè/xóa tạm thời)
-            DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [weak self] in
-                self?.startConfigMonitoring()
-            }
         }
         
+        self.configMonitorSource = source
         source.resume()
-        Logfile.endpointSecurity.log("ESManager: Started monitoring \(ESManager.configPath)")
+        Logfile.endpointSecurity.log("ESManager: Started directory monitoring for \(configDir)")
     }
 }
